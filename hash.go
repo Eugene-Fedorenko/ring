@@ -4,6 +4,8 @@
 
 package ring
 
+import "sync"
+
 const (
 	// 128-bit MurmurHash3 constants
 	murmur64c1 uint64 = 0x87c37b91114253d5
@@ -136,13 +138,21 @@ func bytesToUint64(b []byte) uint64 {
 		uint64(b[4])<<32 | uint64(b[5])<<40 | uint64(b[6])<<48 | uint64(b[7])<<56
 }
 
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		v := make([]byte, 0, 100)
+		return &v
+	},
+}
+
 // generateMultihash returns 4 64-bit (2 x 128-bit) MurmurHash3 hashes.
 func generateMultiHash(data []byte) [4]uint64 {
-	h1, h2 := murmur128(data)
-	buff := make([]byte, len(data)+1)
-	copy(buff, data)
-	buff[len(data)] = single
-	h3, h4 := murmur128(buff)
+	buff := bufPool.Get().(*[]byte)
+	*buff = append((*buff)[:0], data...)
+	h1, h2 := murmur128(*buff)
+	*buff = append(*buff, single)
+	h3, h4 := murmur128(*buff)
+	bufPool.Put(buff)
 	return [4]uint64{h1, h2, h3, h4}
 }
 

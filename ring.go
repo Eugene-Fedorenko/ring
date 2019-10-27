@@ -17,12 +17,15 @@ var (
 	errFalsePositive = errors.New("error: falsePositive must be greater than 0 and less than 1")
 )
 
+const mbs = 256 // mutex batch size
+
 // Ring contains the information for a ring data store.
 type Ring struct {
-	size  uint64        // number of bits (bit array is size/8+1)
-	bits  []uint8       // main bit array
-	hash  uint64        // number of hash rounds
-	mutex *sync.RWMutex // mutex for locking Add, Test, and Reset operations
+	size       uint64                                           // number of bits (bit array is size/8+1)
+	bits       []uint8                                          // main bit array
+	hash       uint64                                           // number of hash rounds
+	mutexBatch [mbs/4][mbs/4][mbs/4][mbs/4]sync.RWMutex // mutex for locking Add, Test, and Reset operations
+	mutexGlobal sync.RWMutex
 }
 
 // Init initializes and returns a new ring, or an error. Given a number of
@@ -42,7 +45,6 @@ func Init(elements int, falsePositive float64) (*Ring, error) {
 	// number of hash operations
 	k := (m / float64(elements)) * math.Log(2)
 
-	r.mutex = &sync.RWMutex{}
 	r.size = uint64(math.Ceil(m))
 	r.hash = uint64(math.Ceil(k))
 	r.bits = make([]uint8, r.size/8+1)
@@ -53,19 +55,21 @@ func Init(elements int, falsePositive float64) (*Ring, error) {
 func (r *Ring) Add(data []byte) {
 	// generate hashes
 	hash := generateMultiHash(data)
-	r.mutex.Lock()
+	r.mutexGlobal.RLock()
+	defer r.mutexGlobal.RUnlock()
+	r.mutexBatch[hash[0] % 4][hash[1] % 4][hash[2] % 4][hash[3] % 4].Lock()
+	defer r.mutexBatch[hash[0] % 4][hash[1] % 4][hash[2] % 4][hash[3] % 4].Unlock()
 	for i := uint64(0); i < r.hash; i++ {
 		index := getRound(hash, i) % r.size
 		r.bits[index/8] |= (1 << (index % 8))
 	}
-	r.mutex.Unlock()
 }
 
 // Reset clears the ring.
 func (r *Ring) Reset() {
-	r.mutex.Lock()
+	r.mutexGlobal.Lock()
 	r.bits = make([]uint8, r.size/8+1)
-	r.mutex.Unlock()
+	r.mutexGlobal.Unlock()
 }
 
 // Test returns a bool if the data is in the ring. True indicates that the data
@@ -73,14 +77,17 @@ func (r *Ring) Reset() {
 func (r *Ring) Test(data []byte) bool {
 	// generate hashes
 	hash := generateMultiHash(data)
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
+	r.mutexGlobal.RLock()
+	defer r.mutexGlobal.RUnlock()
+	r.mutexBatch[hash[0] % 4][hash[1] % 4][hash[2] % 4][hash[3] % 4].RLock()
+	defer r.mutexBatch[hash[0] % 4][hash[1] % 4][hash[2] % 4][hash[3] % 4].RUnlock()
 	for i := uint64(0); i < uint64(r.hash); i++ {
 		index := getRound(hash, i) % r.size
 		// check if index%8-th bit is not active
 		if (r.bits[index/8] & (1 << (index % 8))) == 0 {
 			return false
 		}
+
 	}
 	return true
 }
@@ -91,20 +98,20 @@ func (r *Ring) Merge(m *Ring) error {
 		return errors.New("rings must have the same m/k parameters")
 	}
 
-	r.mutex.Lock()
-	m.mutex.RLock()
+	r.mutexGlobal.Lock()
+	m.mutexGlobal.RLock()
+	defer r.mutexGlobal.Unlock()
+	defer m.mutexGlobal.RUnlock()
 	for i := 0; i < len(m.bits); i++ {
 		r.bits[i] |= m.bits[i]
 	}
-	r.mutex.Unlock()
-	m.mutex.RUnlock()
 	return nil
 }
 
 // MarshalBinary implements the encoding.BinaryMarshaler interface.
 func (r *Ring) MarshalBinary() ([]byte, error) {
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
+	r.mutexGlobal.RLock()
+	defer r.mutexGlobal.RUnlock()
 	out := make([]byte, len(r.bits)+17)
 	// store a version for future compatibility
 	out[0] = 1
@@ -123,11 +130,9 @@ func (r *Ring) UnmarshalBinary(data []byte) error {
 	if data[0] != 1 {
 		return fmt.Errorf("unexpected version: %d", data[0])
 	}
-	if r.mutex == nil {
-		r.mutex = new(sync.RWMutex)
-	}
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
+
+	r.mutexGlobal.Lock()
+	defer r.mutexGlobal.Unlock()
 	r.size = binary.BigEndian.Uint64(data[1:9])
 	r.hash = binary.BigEndian.Uint64(data[9:17])
 	// sanity check against the bits being the wrong size
