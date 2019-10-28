@@ -1,4 +1,4 @@
-module github.com/thetannerryan/ring
+module github.com/eugene-fedorenko/ring
 
 go 1.12
 
