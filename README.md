@@ -11,7 +11,7 @@ usage.
 
 Difference
 
-#####Original library
+**Original library**
 
 ```
 goos: linux
@@ -41,7 +41,7 @@ BenchmarkTestConcurrent-16               3725818               327 ns/op        
     ring_test.go:127: FPR: 0.010232, errors: 10232
 ```
 
-#####With my changes
+**With my changes**
 ```
 goos: linux
 goarch: amd64
