@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	elements = 100000000
+	elements = 1e6
 	fpr      = 0.0001
 )
 
