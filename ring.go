@@ -49,15 +49,23 @@ func Init(elements int, falsePositive float64) (*Ring, error) {
 }
 
 // Add adds the data to the ring.
-func (r *Ring) Add(data []byte) {
+func (r *Ring) Add(data []byte) (new bool) {
 	// generate hashes
 	hash := generateMultiHash(data)
+
 	r.mx.Lock()
 	defer r.mx.Unlock()
+
 	for i := uint64(0); i < r.hash; i++ {
 		index := getRound(hash, i) % r.size
+
+		if (r.bits[index/8] & (1 << (index % 8))) == 0 {
+			new = true
+		}
+
 		r.bits[index/8] |= 1 << (index % 8)
 	}
+	return
 }
 
 // Reset clears the ring.
