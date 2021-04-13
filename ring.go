@@ -19,10 +19,12 @@ var (
 
 // Ring contains the information for a ring data store.
 type Ring struct {
-	size uint64  // number of bits (bit array is size/8+1)
-	bits []uint8 // main bit array
-	hash uint64  // number of hash rounds
-	mx   sync.RWMutex
+	elements int64
+	fpr      float64
+	size     uint64  // number of bits (bit array is size/8+1)
+	bits     []uint8 // main bit array
+	hash     uint64  // number of hash rounds
+	mx       sync.RWMutex
 }
 
 // Init initializes and returns a new ring, or an error. Given a number of
@@ -36,7 +38,7 @@ func Init(elements int, falsePositive float64) (*Ring, error) {
 		return nil, errFalsePositive
 	}
 
-	r := Ring{}
+	r := Ring{elements: int64(elements), fpr: falsePositive}
 	// number of bits
 	m := (-1 * float64(elements) * math.Log(falsePositive)) / math.Pow(math.Log(2), 2)
 	// number of hash operations
@@ -113,12 +115,14 @@ func (r *Ring) Merge(m *Ring) error {
 func (r *Ring) MarshalBinary() ([]byte, error) {
 	r.mx.RLock()
 	defer r.mx.RUnlock()
-	out := make([]byte, len(r.bits)+17)
+	out := make([]byte, len(r.bits)+17+16)
 	// store a version for future compatibility
-	out[0] = 1
+	out[0] = 2
 	binary.BigEndian.PutUint64(out[1:9], r.size)
 	binary.BigEndian.PutUint64(out[9:17], r.hash)
-	copy(out[17:], r.bits)
+	binary.BigEndian.PutUint64(out[17:25], uint64(r.elements))
+	binary.BigEndian.PutUint64(out[25:33], math.Float64bits(r.fpr))
+	copy(out[33:], r.bits)
 	return out, nil
 }
 
@@ -128,7 +132,11 @@ func (r *Ring) UnmarshalBinary(data []byte) error {
 	if len(data) < 17+1 {
 		return fmt.Errorf("incorrect length: %d", len(data))
 	}
-	if data[0] != 1 {
+	if data[0] == 2 {
+		if len(data) < 17+1+16 {
+			return fmt.Errorf("incorrect length: %d", len(data))
+		}
+	} else if data[0] != 1 {
 		return fmt.Errorf("unexpected version: %d", data[0])
 	}
 
@@ -140,6 +148,21 @@ func (r *Ring) UnmarshalBinary(data []byte) error {
 	if len(r.bits) != int(r.size/8+1) {
 		r.bits = make([]uint8, r.size/8+1)
 	}
-	copy(r.bits, data[17:])
+
+	if data[0] == 2 {
+		r.elements = int64(binary.BigEndian.Uint64(data[17:25]))
+		r.fpr = math.Float64frombits(binary.BigEndian.Uint64(data[25:33]))
+		copy(r.bits, data[33:])
+	} else {
+		copy(r.bits, data[17:])
+	}
 	return nil
+}
+
+func (r *Ring) GetElementsCount() int64 {
+	return r.elements
+}
+
+func (r *Ring) GetFpr() float64 {
+	return r.fpr
 }
