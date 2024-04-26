@@ -5,9 +5,12 @@
 package ring
 
 import (
+	"bytes"
+	"crypto/md5"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"sync"
 )
@@ -165,4 +168,117 @@ func (r *Ring) GetElementsCount() int64 {
 
 func (r *Ring) GetFpr() float64 {
 	return r.fpr
+}
+
+type ioCounter struct {
+	w            io.Writer
+	r            io.Reader
+	bytesWritten int64
+	bytesRead    int64
+}
+
+func (c *ioCounter) Write(p []byte) (n int, err error) {
+	n, err = c.w.Write(p)
+	c.bytesWritten += int64(n)
+
+	return
+}
+
+func (c *ioCounter) Read(p []byte) (n int, err error) {
+	n, err = c.r.Read(p)
+	c.bytesRead += int64(n)
+	return
+}
+
+func (r *Ring) WriteTo(w io.Writer) (n int64, err error) {
+	r.mx.RLock()
+	defer r.mx.RUnlock()
+
+	wc := &ioCounter{w: w}
+	defer func() {
+		n = wc.bytesWritten
+	}()
+
+	hash := md5.New()
+	multiWriter := io.MultiWriter(wc, hash)
+
+	var buf [33]byte
+
+	buf[0] = 3 // version
+	binary.BigEndian.PutUint64(buf[1:9], r.size)
+	binary.BigEndian.PutUint64(buf[9:17], r.hash)
+	binary.BigEndian.PutUint64(buf[17:25], uint64(r.elements))
+	binary.BigEndian.PutUint64(buf[25:33], math.Float64bits(r.fpr))
+
+	_, err = multiWriter.Write(buf[:])
+	if err != nil {
+		return
+	}
+
+	_, err = multiWriter.Write(r.bits)
+	if err != nil {
+		return
+	}
+
+	_, err = wc.Write(hash.Sum(nil))
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+var ErrRingCorrupted = errors.New("ring data is corrupted")
+
+func (r *Ring) ReadFrom(reader io.Reader) (n int64, err error) {
+	rc := &ioCounter{r: reader}
+
+	defer func() {
+		n = rc.bytesRead
+
+		if err != nil {
+			err = fmt.Errorf("%w: %w", ErrRingCorrupted, err)
+		}
+	}()
+
+	hash := md5.New()
+	teeReader := io.TeeReader(rc, hash)
+
+	var buf [33]byte
+
+	_, err = io.ReadFull(teeReader, buf[:])
+	if err != nil {
+		return
+	}
+
+	if buf[0] != 3 {
+		err = fmt.Errorf("unexpected version: %d", buf[0])
+		return
+	}
+
+	r.size = binary.BigEndian.Uint64(buf[1:9])
+	r.hash = binary.BigEndian.Uint64(buf[9:17])
+	r.elements = int64(binary.BigEndian.Uint64(buf[17:25]))
+	r.fpr = math.Float64frombits(binary.BigEndian.Uint64(buf[25:33]))
+
+	if len(r.bits) != int(r.size/8+1) {
+		r.bits = make([]uint8, r.size/8+1)
+	}
+
+	_, err = io.ReadFull(teeReader, r.bits)
+	if err != nil {
+		return
+	}
+
+	_, err = io.ReadFull(rc, buf[:md5.Size])
+	if err != nil {
+		return
+	}
+
+	if !bytes.Equal(hash.Sum(nil), buf[:md5.Size]) {
+		err = fmt.Errorf("hash mismatch")
+		return
+	}
+
+	return
 }
